@@ -12,6 +12,7 @@ import uuid
 
 from dotenv import load_dotenv
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from rich.console import Console
@@ -29,6 +30,23 @@ from common.schemas import (
 
 console = Console()
 
+# Pydantic models stored in graph state must be allow-listed, otherwise LangGraph
+# warns (and will later refuse) when reading them back from the checkpoint.
+SERDE = JsonPlusSerializer(allowed_msgpack_modules=[
+    ("common.schemas", "PRAnalysis"),
+    ("common.schemas", "ReviewComment"),
+])
+
+ANALYZE_PROMPT = (
+    "Senior reviewer. Structured output. "
+    "Calibrate confidence honestly: >= 0.73 only for trivial/mechanical changes "
+    "(typo, docs, dependency bump) with no open questions; 0.58-0.72 for any new "
+    "feature, new field or schema change that looks correct but leaves one or two open "
+    "questions (nits and suggestions alone do NOT push it below 0.58); below 0.58 only "
+    "for security-sensitive changes (auth, password hashing, tokens/secrets, SQL built "
+    "from strings, network sync) or several serious red flags."
+)
+
 
 def node_fetch_pr(state: ReviewState) -> dict:
     console.print("[cyan]→ fetch_pr[/cyan]")
@@ -43,7 +61,7 @@ def node_analyze(state: ReviewState) -> dict:
     llm = get_llm().with_structured_output(PRAnalysis)
     with console.status("[dim]LLM reviewing the diff...[/dim]"):
         analysis = llm.invoke([
-            {"role": "system", "content": "Senior reviewer. Structured output."},
+            {"role": "system", "content": ANALYZE_PROMPT},
             {"role": "user", "content": f"Title: {state['pr_title']}\nDiff:\n{state['pr_diff']}"},
         ])
     console.print(f"  [green]✓[/green] confidence={analysis.confidence:.0%}, {len(analysis.comments)} comment(s)")
@@ -63,17 +81,18 @@ def node_route(state: ReviewState) -> dict:
 def node_human_approval(state: ReviewState) -> dict:
     """Pause and ask the human."""
     a = state["analysis"]
-    # TODO: call interrupt(payload) where payload contains these fields:
-    #         "kind": "approval_request",
-    #         "confidence": a.confidence,
-    #         "confidence_reasoning": a.confidence_reasoning,
-    #         "summary": a.summary,
-    #         "comments": [c.model_dump() for c in a.comments],
-    #         "diff_preview": state["pr_diff"][:2000],
     # interrupt() returns whatever the caller passes via Command(resume=...).
-    # response = interrupt(...)
-    # return {"human_choice": response["choice"], "human_feedback": response.get("feedback")}
-    raise NotImplementedError("Call interrupt() with an approval_request payload")
+    # Side-effects stay in node_commit: this node re-runs from the top on resume.
+    response = interrupt({
+        "kind": "approval_request",
+        "pr_url": state["pr_url"],
+        "confidence": a.confidence,
+        "confidence_reasoning": a.confidence_reasoning,
+        "summary": a.summary,
+        "comments": [c.model_dump() for c in a.comments],
+        "diff_preview": state["pr_diff"][:2000],
+    })
+    return {"human_choice": response["choice"], "human_feedback": response.get("feedback")}
 
 
 def _render_comment_body(state: ReviewState) -> str:
@@ -133,8 +152,8 @@ def build_graph():
     g.add_edge("human_approval", "commit")
     g.add_edge("commit", END)
     g.add_edge("escalate", END)
-    # TODO: compile with checkpointer=MemorySaver()
-    return g.compile()
+    # interrupt() needs a checkpointer to persist state between pause and resume.
+    return g.compile(checkpointer=MemorySaver(serde=SERDE))
 
 
 def prompt_human(payload: dict) -> dict:
@@ -174,12 +193,10 @@ def main() -> None:
 
     result = app.invoke({"pr_url": args.pr, "thread_id": thread_id}, cfg)
 
-    # TODO: write a `while "__interrupt__" in result:` loop:
-    #   - take payload from result["__interrupt__"][0].value
-    #   - call prompt_human(payload)
-    #   - resume with app.invoke(Command(resume=<answer>), cfg)
-    # while "__interrupt__" in result:
-    #     ...
+    while "__interrupt__" in result:
+        payload = result["__interrupt__"][0].value
+        answer = prompt_human(payload)
+        result = app.invoke(Command(resume=answer), cfg)
 
     console.rule("Done")
     console.print(result.get("final_action"))

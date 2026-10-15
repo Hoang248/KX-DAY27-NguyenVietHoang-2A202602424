@@ -26,6 +26,22 @@ from common.schemas import (
 
 console = Console()
 
+SYSTEM_PROMPT = (
+    "You are a senior software engineer reviewing a GitHub pull request. "
+    "Return a structured review: a one-paragraph summary, risk_factors, and concrete "
+    "review comments (file, line when known, severity, body).\n"
+    "Calibrate `confidence` honestly — it is your confidence that the PR is safe to merge "
+    "and that your review is complete:\n"
+    "  - >= 0.73: trivial / mechanical change (typo, docs, dependency bump), no open questions.\n"
+    "  - 0.58-0.72: small, self-contained feature that looks correct but leaves one or two "
+    "open questions (e.g. how an added column/field is migrated, a missing test). "
+    "Nits and suggestions alone do NOT push a PR below 0.58.\n"
+    "  - < 0.58: only for security-sensitive code (auth, password hashing, tokens/secrets, "
+    "SQL built from strings, network sync) or several serious red flags.\n"
+    "Explain the score in `confidence_reasoning`. When confidence < 0.58, populate "
+    "`escalation_questions` with 2-4 specific questions for the human reviewer."
+)
+
 
 def node_fetch_pr(state: ReviewState) -> dict:
     console.print("[cyan]→ fetch_pr[/cyan]")
@@ -40,22 +56,27 @@ def node_fetch_pr(state: ReviewState) -> dict:
 
 def node_analyze(state: ReviewState) -> dict:
     console.print("[cyan]→ analyze[/cyan]")
-    # TODO: call the LLM with structured output PRAnalysis.
-    # Hint:  llm = get_llm().with_structured_output(PRAnalysis)
-    #        analysis = llm.invoke([...])
-    #        return {"analysis": analysis}
-    # When implemented, wrap the call in:
-    #        with console.status("[dim]LLM thinking...[/dim]"):
-    #            analysis = llm.invoke([...])
-    raise NotImplementedError("Implement node_analyze")
+    llm = get_llm().with_structured_output(PRAnalysis)
+    with console.status("[dim]LLM thinking...[/dim]"):
+        analysis = llm.invoke([
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Title: {state['pr_title']}\nDiff:\n{state['pr_diff']}"},
+        ])
+    console.print(f"  [green]✓[/green] confidence={analysis.confidence:.0%}, {len(analysis.comments)} comment(s)")
+    return {"analysis": analysis}
 
 
 def node_route(state: ReviewState) -> dict:
     console.print("[cyan]→ route[/cyan]")
-    # TODO: read state["analysis"].confidence and return
-    #       {"decision": "auto_approve" | "human_approval" | "escalate"}
-    # Thresholds provided: AUTO_APPROVE_THRESHOLD (0.85) and ESCALATE_THRESHOLD (0.60).
-    raise NotImplementedError("Implement node_route")
+    c = state["analysis"].confidence
+    if c >= AUTO_APPROVE_THRESHOLD:
+        decision = "auto_approve"
+    elif c < ESCALATE_THRESHOLD:
+        decision = "escalate"
+    else:
+        decision = "human_approval"
+    console.print(f"  [green]✓[/green] decision=[bold]{decision}[/bold] (confidence={c:.0%})")
+    return {"decision": decision}
 
 
 def node_auto_approve(state: ReviewState) -> dict:
@@ -75,11 +96,22 @@ def node_escalate(state: ReviewState) -> dict:
 
 def build_graph():
     g = StateGraph(ReviewState)
-    # TODO: add_node for the 6 nodes above (fetch_pr, analyze, route, auto_approve, human_approval, escalate)
-    # TODO: add_edge from START → fetch_pr → analyze → route
-    # TODO: add_conditional_edges on "route" with mapping
-    #       {"auto_approve": "auto_approve", "human_approval": "human_approval", "escalate": "escalate"}
-    # TODO: add_edge from each terminal node → END
+    g.add_node("fetch_pr", node_fetch_pr)
+    g.add_node("analyze", node_analyze)
+    g.add_node("route", node_route)
+    g.add_node("auto_approve", node_auto_approve)
+    g.add_node("human_approval", node_human_approval)
+    g.add_node("escalate", node_escalate)
+
+    g.add_edge(START, "fetch_pr")
+    g.add_edge("fetch_pr", "analyze")
+    g.add_edge("analyze", "route")
+    g.add_conditional_edges(
+        "route", lambda s: s["decision"],
+        {"auto_approve": "auto_approve", "human_approval": "human_approval", "escalate": "escalate"},
+    )
+    for terminal in ("auto_approve", "human_approval", "escalate"):
+        g.add_edge(terminal, END)
     return g.compile()
 
 

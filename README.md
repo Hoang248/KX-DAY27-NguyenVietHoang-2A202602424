@@ -1,5 +1,37 @@
 # Day27 — Track 3: HITL PR Review Agent
 
+| | |
+|---|---|
+| **Họ và tên** | Nguyễn Việt Hoàng |
+| **MSSV** | 2A202602424 |
+| **GitHub** | https://github.com/Hoang248/KX-DAY27-NguyenVietHoang-2A202602424 |
+| **Bài** | Day 27 — Track 3: Human-in-the-Loop PR Review Agent (LangGraph) |
+
+## Bài làm (student submission)
+
+All 5 exercises are implemented — no `# TODO` / `NotImplementedError` left in `exercises/` or `app.py`.
+
+| Exercise | File | What was implemented |
+|---|---|---|
+| 1 — Confidence routing | `exercises/exercise_1_confidence.py` | `node_analyze` (LLM `with_structured_output(PRAnalysis)` + calibrated system prompt), `node_route` (≥ 73% → `auto_approve`, < 58% → `escalate`, else `human_approval`), full graph wiring with `add_conditional_edges` |
+| 2 — HITL `interrupt()` | `exercises/exercise_2_hitl.py` | `node_human_approval` pauses with an `approval_request` payload (diff + reasoning + comments), graph compiled with `MemorySaver`, `while "__interrupt__" in result` resume loop via `Command(resume=...)` |
+| 3 — Escalation Q&A | `exercises/exercise_3_escalation.py` | Prompt makes the LLM write 2–4 file-specific `escalation_questions` when confidence < 58%; `node_escalate` interrupts with `kind="escalation"`; `node_synthesize` re-prompts with diff + initial analysis + reviewer Q&A; wiring `escalate → synthesize → commit` |
+| 4 — SQLite audit trail | `exercises/exercise_4_audit.py` | `audit()` → `write_audit_event`; one `AuditEntry` per node (`analyze`, `route`, `auto_approve`, `synthesize`, `commit`) and two for each HITL node (before + after `interrupt()`); the "before" row is de-duplicated because the node re-runs on resume; `reviewer_id` comes from `GITHUB_USER` |
+| 5 — Streamlit UI | `app.py` | PR URL form → graph on `AsyncSqliteSaver`; Approve / Reject / Edit card (58–72%); escalation question form (< 58%); success card for auto-approve (> 72%); `thread_id` in `st.session_state`; sidebar of recent sessions from `audit_events` that reopens a session from its checkpoint (including a pending interrupt); per-session audit table |
+
+**Quick run**
+
+```bash
+uv sync
+cp .env.example .env        # fill OPENROUTER_API_KEY, GITHUB_TOKEN, GITHUB_USER
+uv run python exercises/exercise_1_confidence.py --pr https://github.com/VinUni-AI20k/PR-Demo/pull/1
+uv run python exercises/exercise_4_audit.py --pr https://github.com/VinUni-AI20k/PR-Demo/pull/2
+uv run python -m audit.replay --list
+uv run streamlit run app.py
+```
+
+> The sections below are the original lab instructions.
+
 A 2-hour lab that builds a human-in-the-loop pull-request review agent in **LangGraph**, end-to-end.
 
 > 1. Agent reads a PR, analyzes code changes, proposes review comments.
@@ -78,6 +110,7 @@ Thresholds live in `common/schemas.py` (`AUTO_APPROVE_THRESHOLD = 0.73`, `ESCALA
 ├── README.md                # this file — the only documentation
 ├── pyproject.toml
 ├── .env.example
+├── app.py                   # Exercise 5 — Streamlit approval UI
 │
 ├── common/                  # shared utilities — provided, don't modify
 │   ├── llm.py               # ChatOpenAI factory (OpenRouter)
@@ -131,7 +164,8 @@ The agent calls the GitHub REST API directly to **read PR diffs** and **post rev
 ## Setup (once)
 
 ```bash
-git clone <lab-repo-url> && cd Day27-Track3-HITL
+git clone https://github.com/Hoang248/KX-DAY27-NguyenVietHoang-2A202602424.git
+cd KX-DAY27-NguyenVietHoang-2A202602424
 uv sync                                     # install Python deps
 cp .env.example .env && $EDITOR .env        # set OPENROUTER_API_KEY and GITHUB_TOKEN
 ```
